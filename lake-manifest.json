@@ -1,0 +1,6 @@
+{"version": "1.3.0",
+ "packagesDir": ".lake/packages",
+ "packages": [],
+ "name": "«rectgtn-domain-c-abi»",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}
