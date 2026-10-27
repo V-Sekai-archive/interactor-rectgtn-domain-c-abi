@@ -1,140 +1,205 @@
-/* rectgtn_api.h — C surface for the RECTGTN HTN planner.
-
-   Lives INSIDE the guest ELF (riscv64-linux, godot-sandbox / libriscv).
-   The domain and all logic are pure Lean; on `lean build` they emit the
-   .c intermediate this header declares. The host reads a plan the same way
-   it reads the taskweft Elixir API: JSON in, JSON out.
-
-   SPDX-License-Identifier: MIT
-   Copyright (c) 2026 K. S. Ernest (iFire) Lee
-
-   ------------------------------------------------------------------------
-
-   API surface (mirrors Taskweft.MCP / Taskweft CLI):
-
-     plan(domain)                      -> bare JSON array of steps
-     replan(domain, plan, fail_step)   -> {fail_step, completed_steps,
-                                          plan, temporal}
-     validate(domain)                  -> {ok, ...}
-     compose(domain, [overlays])       -> composed domain (JSON-LD)
-     temporal(plan)                    -> temporal block (from action durations)
-     rebac_check(graph, expr, subj, obj) -> bool (the capability guard)
-     pointer_set(domain, "/key/path", value) -> domain
-     pointer_get(domain, "/key/path")  -> variant
-     version()                         -> "0.0.1"
-
-   JSON string API (host-facing; null = empty / success)
-   ------------------------------------------------------------------------
+/*
+ * rectgtn_api.h — C surface for the RECTGTN domain, embedded in a RISC-V
+ * guest ELF (godot-sandbox / libriscv).
+ *
+ * The whole domain is pure Lean. On `lake build` the Lean core emits a `.c`
+ * intermediate that implements every function below; this header is the
+ * contract that intermediate must satisfy. There is no hand-written C
+ * implementation of the domain logic -- only the guest entry point and the
+ * I/O glue live in C (see guest/main.c).
+ *
+ * Two API invariants:
+ *
+ *   1. Pascal strings.   Every string crossing this boundary is length + bytes,
+ *      exactly like Godot's native `String` -- NEVER null-terminated.  `length`
+ *      counts UTF-8 bytes; `bytes` is NULL only when `length == 0`.
+ *
+ *   2. Temporal is intrinsic.   Every plan is a temporal plan.  The temporal
+ *      block is a required, always-present member of `RectGTNPlan`, NOT a
+ *      separate `temporal(plan)` function.  There is no free-standing temporal
+ *      recompute -- the temporal block is computed once, per plan, and shipped
+ *      with it.  (issue #2: "all RECTGTNs are temporal plans.")
+ *
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef RECTGTN_API_H
 #define RECTGTN_API_H
 
-#if __cplusplus
+#if defined(__cplusplus)
 extern "C" {
 #endif
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-/* ----------------------------------------------------------------------
- *  Version
- * ---------------------------------------------------------------------- */
-const char *rectgtn_version(void);
+/* ------------------------------------------------------------------------
+ * Pascal string (Godot-style: length + bytes, no null terminator).
+ *
+ *   Input  : a borrowed `const RectGTNString *`. The caller keeps its bytes
+ *            alive for the duration of the call; the function never frees it.
+ *   Output : an owning `RectGTNString *` the caller MUST rectgtn_string_free().
+ *
+ *   An empty string is { .length = 0, .bytes = NULL }.
+ */
+typedef struct RectGTNString {
+    uint32_t  length;         /* bytes (UTF-8) */
+    const uint8_t *bytes;      /* length bytes; NULL iff length == 0 */
+} RectGTNString;
 
-/* ----------------------------------------------------------------------
- *  Domain lifecycle (JSON-LD in / out). A domain is one RECTGTN document
- *  (@type domain:Definition | domain:Problem | domain:MetaDomain, `name`
- *  required). A problem is a plain overlay: compose(domain, problem) is the
- *  whole "problem" the planner solves. Later documents win; a non-empty
- *  todo_list replaces. (Merge rules: docs/rectgtn.md "Composing several
- *  documents".)
- * ---------------------------------------------------------------------- */
-/* Build a domain from one or more JSON-LD strings. `overlays[0..n-1]`
- *   compose over `base` left to right.  n may be 1 (just the base).
- *   Returns a NUL-terminated C string (caller must rectgtn_free it). */
-char *rectgtn_domain_compose(const char **overlays, size_t n);
+void rectgtn_string_free(RectGTNString *s);
 
-/* Validate one document (or an already-composed one). Returns a JSON object
- *   {"ok": true/false, "reason": "..."} or null on a hard parse crash. */
-char *rectgtn_domain_validate(const char *domain);
+/* ------------------------------------------------------------------------
+ * ISO-8601 duration.  Canonical `P[nY][nM][nD][W]T[nH][nM][nS]` with optional
+ * sub-second fraction.  "P" = zero.  Represented as a Pascal string so it can
+ * carry the sub-second fraction exactly (no float round-trip). */
+typedef RectGTNString RectGTNDuration;
 
-/* ----------------------------------------------------------------------
- *  Planning
- * ---------------------------------------------------------------------- */
-/* plan(domain) -> the bare JSON array of steps, e.g.
- *      [["a_fly","drone_1","city"], ["do_a"]]
- *   or null if no plan (a refusal: the domain has no alternative that
- *   satisfies every task — mirrors Taskweft.plan's no_plan). */
-char *rectgtn_plan(const char *domain);
+/* ------------------------------------------------------------------------
+ * Temporal block.  The intrinsic timing of a plan (or of a single step).
+ *
+ *   `start` / `end` are absolute offsets from the plan origin (ISO-8601);
+ *   `duration` is the step's own duration (PT0S by default when the action has
+ *   no duration).  `consistent` is false iff the step overlaps a step that
+ *   already ran and is not allowed (STN / action-conflict violation). */
+typedef struct {
+    RectGTNDuration start;      /* absolute */
+    RectGTNDuration end;        /* absolute */
+    RectGTNDuration duration;   /* this step's own duration (default PT0S)   */
+    bool      consistent;       /* STN-consistent within the plan            */
+} RectGTNTemporal;
 
-/* plan_envelope(domain) -> {"plan": [...], "temporal": {...}}.
- *   The full plan response as Taskweft returns it, with the temporal
- *   block (consistent, origin, total, steps[]) computed from action
- *   durations (ISO 8601; missing -> PT0S). */
-char *rectgtn_plan_envelope(const char *domain);
+/* ------------------------------------------------------------------------
+ * Plan step.  One element of the step sequence.  A step is a temporal step --
+ * it carries its own `start`/`end`/`duration`/`consistent` block, derived
+ * from the plan's composed durations. */
+typedef struct {
+    RectGTNString name;         /* the action name (opaque identity ref)       */
+    RectGTNTemporal temporal;   /* intrinsic timing of this step               */
+} RectGTNStep;
 
-/* replan(domain, plan_json, fail_step) ->
- *      {"fail_step": i, "completed_steps": k, "plan": [...],
- *       "temporal": {...}}
- *   Re-plan the domain, failing to execute at 0-based step `fail_step`
- *   (the first step that failed).  `fail_step == -1` replans the whole
- *   plan as complete (the soundness contract: replan with fail_step == -1
- *   reports the whole plan complete). */
-char *rectgtn_replan(const char *domain, const char *plan_json,
-                     long fail_step);
+/* ------------------------------------------------------------------------
+ * Plan.  A temporal plan -- the temporal block is intrinsic and always
+ * present (there is no `temporal()` side-channel function).  `steps` holds
+ * 0..N RectGTNStep's (caller frees via rectgtn_plan_free).  On a refusal
+ * (no alternative satisfies every goal) step_count is 0 and consistent is
+ * false. */
+typedef struct {
+    uint32_t  step_count;
+    RectGTNStep *steps;         /* length = step_count, may be NULL            */
+    RectGTNTemporal total;      /* plan-level block: origin, total duration,   */
+                                /* per-step offsets, STN consistency           */
+    bool   consistent;          /* overall plan STN-consistency (alias of      */
+                                /* total.consistent, redundant for convenience) */
+} RectGTNPlan;
 
-/* ----------------------------------------------------------------------
- *  Temporal
- * ---------------------------------------------------------------------- */
-/* temporal(plan) -> {"consistent":bool,"origin":"PT0S","total":"PT45M",
- *      "steps":[{"action":"a","duration":"PT5M","start":"PT0S",
- *                "end":"PT5M"}, ...]}
- *   from the bare-step array (action duration from the composed domain;
- *   default PT0S). */
-char *rectgtn_temporal(const char *plan_json);
+/* Free the step array (and its members) of a plan.  The caller owns `total`. */
+void rectgtn_plan_free(RectGTNPlan *p);
 
-/* ----------------------------------------------------------------------
- *  ReBAC  (capabilities/relationship graph, ADR 0004)
- * ---------------------------------------------------------------------- */
-/* A relation expression is a JSON string of the form:
- *     {"rel": "OWNS", "pivot": {"rel":"IS_MEMBER_OF"}, ...}   (composited)
- *   or a bare name string "HAS_CAPABILITY".
- *   expr may be a string (bare name / expression object).  subject and
- *   object are strings.  Returns true if the relation holds along a chain.
- *   (The planner guards on this: {eval:{type:"rebac/check", rel: expr,
- *    subject:"{agent}", object:"fly"}}.) */
-bool rectgtn_rebac_check(const char *graph_json,
-                         const char *expr,
-                         const char *subject,
-                         const char *object);
+/* ------------------------------------------------------------------------
+ * Validation result. */
+typedef struct {
+    bool              ok;       /* structural / JSON-LD / schema valid          */
+    RectGTNString reason;      /* human-readable reason (empty when ok)       */
+    RectGTNString details;     /* optional machine-reason (empty when none)   */
+} RectGTNValidation;
 
-/* Parse the domain's ReBAC graph and check one relation — convenience
- *   wrapper: reads capabilities.graph from the composed domain. */
-bool rectgtn_domain_has_capability(const char *domain,
-                                   const char *subject,
-                                   const char *relation);
+void rectgtn_validation_free(RectGTNValidation *v);
 
-/* ----------------------------------------------------------------------
- *  Pointer state  (/var/key  = a JSON-LD pointer into `variables`)
- * ---------------------------------------------------------------------- */
-/* Apply an eval/pointer/set step to the running state.  state is the
- *   current /var/ object (JSON object), step is the pointer/set JSON-LD
- *   step {"pointer/set": "/var/key", "value": <v>} or {"pointer/get": ...}.
- *   Returns the new state as a JSON string, or a JSON {"error":"..."}. */
-char *rectgtn_ptr_set(const char *state, const char *step);
+/* ------------------------------------------------------------------------
+ * Domain lifecycle (JSON-LD in / out) ------------------------------------------------
+ */
+/*
+ * Compose several JSON-LD documents into one domain.  `base` and each
+ * `overlay` are Pascal-JSON strings.  Later documents replace `variables`,
+ * `methods`, `goalMethods`, `todoList` per the merge rules in
+ * docs/rectgtn.md "Composing several documents".
+ */
+RectGTNString *rectgtn_domain_compose(const RectGTNString *base,
+                                      const RectGTNString *overlay);
 
-/* Pointer get: {"pointer"/value} into state. Returns JSON value or null. */
-char *rectgtn_ptr_get(const char *state, const char *key_path);
+/*
+ * Validate one domain (JSON-LD Pascal string).  Returns a RectGTNValidation;
+ * ok is false (with a named reason) when the domain refuses.
+ */
+RectGTNValidation *rectgtn_domain_validate(const RectGTNString *domain);
 
-/* ----------------------------------------------------------------------
- *  Memory
- * ---------------------------------------------------------------------- */
-/* Free any string returned by the functions above.  The domain handles and
- *   C-string buffers are all rectgtn_free-able. */
-void rectgtn_free(char *);
+/* ------------------------------------------------------------------------
+ * Planning --------------------------------------------------------------- */
+/*
+ * plan(domain) -> the intrinsic temporal plan of `domain`.
+ * On a refusal, step_count == 0 and consistent == false.
+ */
+RectGTNPlan *rectgtn_plan(const RectGTNString *domain);
 
-#if __cplusplus
+/*
+ * replan(domain, plan, fail_step).  `plan` is the intrinsic plan (serialized
+ * as the Pascal-JSON "plan" field) currently being executed.  Returns a new
+ * RectGTNPlan that is the continuation: the failed step (0-based `fail_step`,
+ * -1 = whole plan complete) is re-solved and the temporal block is re-derived.
+ */
+RectGTNPlan *rectgtn_replan(const RectGTNString *domain,
+                            const RectGTNString *plan_json,
+                            int fail_step);
+
+/* ------------------------------------------------------------------------
+ * Host-facing JSON convenience (NIF-compatible) --------------------------- */
+/*
+ * plan_json(domain) -> {"steps":[...], "temporal":{...}}
+ * replan_json(domain, plan_json, fail_step) -> {"fail_step","completed_steps",
+ *   "plan":[...], "temporal":{...}}
+ * All strings are Pascal (length + bytes).
+ */
+RectGTNString *rectgtn_plan_json(const RectGTNString *domain);
+RectGTNString *rectgtn_replan_json(const RectGTNString *domain,
+                                   const RectGTNString *plan_json,
+                                   int fail_step);
+
+/* ------------------------------------------------------------------------
+ * ReBAC (capabilities / relationships, ADR 0004) --------------------------- */
+/*
+ * True iff `subject` is related to `object` via `relation` (direct or through
+ * the composition of the `definitions` aliases).  `graph_json` is the
+ * composed domain's `capabilities.graph` JSON string.  All are Pascal.
+ */
+bool rectgtn_rebac_check(const RectGTNString *graph_json,
+                         const RectGTNString *relation,
+                         const RectGTNString *subject,
+                         const RectGTNString *object);
+
+/*
+ * Convenience: read `capabilities.graph` from the composed domain and check
+ * one relation (subject = "HAS_CAPABILITY"-style edge).
+ */
+bool rectgtn_domain_has_capability(const RectGTNString *domain,
+                                   const RectGTNString *subject,
+                                   const RectGTNString *relation);
+
+/* ------------------------------------------------------------------------
+ * Pointer state (/var/key) ------------------------------------------------ */
+/*
+ * Apply a pointer/set step to the running state.  `state` is the current
+ * /var/ object (JSON-LD Pascal string); `step` is the pointer/set JSON-LD
+ * step.  Returns the NEW state as a Pascal JSON string (caller owns).
+ */
+RectGTNString *rectgtn_ptr_set(const RectGTNString *state,
+                               const RectGTNString *step);
+
+/*
+ * Read one pointer path from `state`.  Returns a Pascal string holding the
+ * JSON value, or empty when the path is absent.
+ */
+RectGTNString *rectgtn_ptr_get(const RectGTNString *state,
+                               const RectGTNString *key_path);
+
+/* ------------------------------------------------------------------------
+ * Memory & version -------------------------------------------------------- */
+void rectgtn_free_all(RectGTNPlan *p, RectGTNValidation *v);
+
+RectGTNString *rectgtn_version(void);   /* Pascal; caller frees */
+
+#if defined(__cplusplus)
 }
 #endif
 
