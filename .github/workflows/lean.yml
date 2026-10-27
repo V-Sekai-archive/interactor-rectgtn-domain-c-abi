@@ -5,8 +5,10 @@
 # (elan init + lake build + a `run_tests`-style gate).
 #
 # RFD 66606-2153 stage 1: the pure-Lean domain core builds and the self-test
-# gate is green.  When the host-emitting `.c` intermediate lands (RFD
-# 66606-2153 stage 3), this gate extends to the full C-ABI emission test.
+# gate is green.  Stage 3 is the Lean runtime port to riscv64-linux, which
+# compiles the core into a RISC-V guest; the addon's binary-translation engine
+# (already green, see the motion/skintokens/rfdetr `check_bintr` gates) then
+# converts that guest's .text to native C and the host calls it natively.
 
 name: Lean
 
@@ -48,15 +50,15 @@ jobs:
           # directly, so a non-zero exit fails the job without a special
           # assertion.)
 
-      - name: Build the native ELF (lean core -> C)
-        # Not yet available in Lean 4.35 (no native C backend). This step
-        # is a placeholder for the RFD 66606-2153 stage-3 gate: once the
-        # Lean core emits a `.c` intermediate that implements every
-        # rectgtn_* symbol, this step will link it against the guest shim
-        # and verify the `.sandbox_variant` section.  Until then it is a
-        # commented-out placeholder so the workflow stays green.
+      - name: Build the native ELF (lean core -> RISC-V guest -> native C)
+        # Not available yet: stage 3 (RFD66606-2153) is the Lean runtime port
+        # to riscv64-linux, which compiles the Lean core into a RISC-V guest.
+        # That guest is what the addon's binary-translation engine (already
+        # green, see the motion/skintokens/rfdetr check_bintr gates) converts to
+        # native C at load time and the host calls.  Until the port lands there
+        # is nothing here; this commented placeholder keeps the workflow green.
         run: |
-          echo "C-ABI emission gate pending (RFD 66606-2153 stage 3)"
-          # (stage 3) lake build -n c-abi --target riscv64-linux
+          echo "RISC-V guest gate pending (RFD 66606-2153 stage 3)"
+          # (stage 3) build rectgtn.elf from the Lean runtime (riscv64-linux)
           # (stage 3) verify .sandbox_variant via objcopy + python SBXV/size gate
           # (stage 3) verify rectgtn_* symbols in .symtab via objdump

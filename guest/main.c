@@ -16,12 +16,16 @@
  *      required member of `RectGTNPlan`; there is no free-standing
  *      `temporal(plan)` recompute function (issue #2).
  *
- * The domain logic is pure Lean. On `lake build` the Lean core emits a `.c`
- * intermediate (RFD66606-2153 stage 3) that implements every rectgtn_* symbol
- * below. Until that stage lands, this file supplies a minimal stub body for
- * each symbol so the guest builds end-to-end and the CI can prove the ELF shape
- * (static RISC-V64 Linux, `.sandbox_variant` SBXV + variant size, stripped
- * symbol table with the rectgtn_* names present).
+ * The domain logic is pure Lean.  When it is compiled to a RISC-V guest
+ * (Lean runtime port to riscv64-linux, RFD66606-2153 stage 3), the godot-
+ * sandbox addon's binary-translation engine converts that guest's `.text`
+ * to native C (`bintr-<hash>.c`, clang) and the host calls every rectgtn_*
+ * symbol below through it (`sb.has_function` / `sb.vmcall`).  Today the Lean
+ * core is not yet compiled to RISC-V, so this file supplies a minimal stub
+ * body for each symbol: it builds end-to-end and the CI proves the guest ELF
+ * shape (static RISC-V64 Linux, `.sandbox_variant` SBXV + variant size,
+ * stripped symbol table with the rectgtn_* names present) without the Lean
+ * runtime port.
  *
  * The host finds guest functions by resolved symbol name (see
  * 4-entities/godot-sandbox src/sandbox.cpp `sb.has_function`), so these plain
@@ -64,10 +68,12 @@ const unsigned char sandbox_variant_size[8] =
 #endif
 
 /* ------------------------------------------------------------------------
- * C-ABI symbols — stubs for now.  When the Lean core lands (RFD66606-2153
- * stage 3), the Lean-emitted .c intermediate implements these and this file
- * shrinks to pure glue.  The stubs keep every rectgtn_* name exported so
- * the symbol check in build_guest_elf.yml passes while the skeleton is green.
+ * C-ABI symbols — stubs for the stage-1 skeleton.  When the Lean core is
+ * compiled to a RISC-V guest (RFD66606-2153 stage 3), these become real
+ * Lean-compiled RISC-V functions, and the addon's binary-translation engine
+ * converts them to native C at load time (this file shrinks to glue).  The
+ * stubs keep every rectgtn_* name exported so the symbol check in
+ * build_guest_elf.yml passes while the skeleton is green.
  * ------------------------------------------------------------------------ */
 RectGTNString *rectgtn_version(void)
 {
