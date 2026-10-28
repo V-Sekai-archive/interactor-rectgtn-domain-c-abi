@@ -13,3 +13,4 @@ priv/*.dll
 work/
 bench/*.tmp
 *\.elf
+erl_crash.dump
