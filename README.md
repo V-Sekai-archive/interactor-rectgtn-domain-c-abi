@@ -50,8 +50,13 @@ pure-Lean domain (this repo)
 ```sh
 lean  # Lean 4 toolchain (4.35+)
 lake build
-lake exe rectgtn_domain    # the self-test gate
+lake exe mcp_auth_witness   # witness gate: must exit 0, print "OK:"
+lake exe khr_tier1_witness   # witness gate: must exit 0, print "OK:"
 ```
+
+Both witness exes are the green gate for the domain (they certify the MCP
+authorization ReBAC witness and the KHR Tier 1 decomposition witness, and
+fail with a non-zero exit on refusal).
 
 ## Build the guest ELF
 

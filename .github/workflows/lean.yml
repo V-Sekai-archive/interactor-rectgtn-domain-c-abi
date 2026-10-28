@@ -1,5 +1,5 @@
 # The Lean build and the self-test gate: the domain core must build, and the
-# self-test (lake exe rectgtn_domain) must pass — the green gate for
+# witness exes must pass — the green gate for
 # 2-contract's RECTGTN domain.  This mirrors 4-entities/godot-sandbox's green
 # `build_gdscript_elf.yml` shape and the archived FBD repo's `lean.yml`
 # (elan init + lake build + a `run_tests`-style gate).
@@ -39,16 +39,14 @@ jobs:
         run: |
           lake build
 
-      - name: Run the self-test gate
+      - name: Run the witness gates
         run: |
-          lake exe rectgtn_domain
-          # green gate: the process must exit 0 (green) and print "ok:";
-          # a refusal ("FAIL:") or a non-zero exit fails the workflow.
-          # (We do not assert on the exit code here, because `lake exe`
-          # propagates `IO` `exit` as the process exit code: 0 = ok, 1 =
-          # self-test FAIL. The `run:` shell sees the process exit code
-          # directly, so a non-zero exit fails the job without a special
-          # assertion.)
+          lake exe mcp_auth_witness
+          lake exe khr_tier1_witness
+          # green gate: each witness must exit 0 and print "OK:". A non-zero
+          # exit (a witness refuses) fails the workflow — `lake exe` propagates
+          # `IO` `exit` as the process exit code: 0 = ok, 1 = refusal. The
+          # `run:` shell sees that exit code directly.
 
       - name: Build the native ELF (lean core -> RISC-V guest -> native C)
         # Not available yet: stage 3 (RFD66606-2153) is the Lean runtime port
