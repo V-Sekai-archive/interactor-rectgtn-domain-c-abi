@@ -36,6 +36,18 @@ pure-Lean domain (this repo)
 - A **guest** (`guest/`) — the RISC-V64 Linux executable the sandbox loads,
   emitting the `.sandbox_variant` section (SBXV magic + Variant size) and
   exporting the `rectgtn_*` symbols.
+- The **planner engine** — the C++20 implementation of the same model
+  (`standalone/`), wrapped as the Erlang NIF `c_src/taskweft_nif.cpp` and
+  exposed to Elixir as `taskweft_nif` (`lib/`, `mix.exs`). It builds into
+  `priv/libtaskweft_nif.so` from the repository root, beside the Lean package.
+
+The Lean model and the C++ engine are two implementations of one domain: the
+witness exes certify the model, the NIF's differential harness cross-checks the
+engine against the same corpus, and `test/differential/` holds the fixtures both
+read.
+
+This repository took the planner when `V-Sekai-fire/nif` was retired; that fork
+of `taskweft/nif` is archived, and its history is merged in here.
 
 ## Two invariants
 
@@ -74,6 +86,26 @@ The artifact is a stripped, position-independent **RISC-V64 Linux ELF** with a
 `.sandbox_variant` section (`SBXV` magic + the 4-byte little-endian Variant
 size, 40 for double precision) and the `rectgtn_*` symbols resolvable by
 name, mirroring `godot-sandbox`'s `gdscript.elf` build.
+
+## Build the planner NIF
+
+```sh
+mix deps.get
+mix compile                  # builds priv/libtaskweft_nif.so
+mix test                     # unit suite
+mix test --only differential # the differential harness against the corpus
+```
+
+The NIF is no longer published to Hex. Consumers take it as a git dependency on
+this repository — the mix project sits at the root, so no subdirectory is
+involved:
+
+```elixir
+{:taskweft_nif, git: "https://github.com/V-Sekai-fire/interactor-rectgtn-domain-c-abi"}
+```
+
+`interactor-taskweft` is the consumer; its `.github/workflows/nif.yml` here runs
+the same three commands on Linux, Windows (mingw and msvc) and macOS.
 
 ## Stage 1: the C-shim guest
 
