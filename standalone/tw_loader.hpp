@@ -971,6 +971,74 @@ inline std::vector<TwTask> expand_subtasks(const TwValue::Array &defs, const Par
 
 // ---- Callable builders -----------------------------------------------------
 
+// ---- Action touches (RECTGTN 'T' concurrency) -------------------------------
+//
+// What one action's body touches, for the temporal analysis: the JSON-pointer
+// paths it writes, the paths its guards read, and the ReBAC (subject, object)
+// pairs it asks about. Paths and refs keep their `{param}` placeholders; the
+// analysis substitutes them per call.
+//
+// The walk recurses through operand nodes, so a `pointer/get` nested inside a
+// `math/eq` operand is found, and a `pointer/set` whose `value` is itself a
+// node contributes that node's reads.
+
+inline bool is_rebac_check(const TwValue::Dict &expr) {
+    auto it = expr.find("type");
+    return it != expr.end() && it->second.is_string() &&
+           it->second.as_string().find("rebac") != std::string::npos &&
+           node_type(expr) == "check";
+}
+
+inline bool is_pointer_get(const TwValue::Dict &expr) {
+    return node_type(expr) == "get";
+}
+
+inline void collect_expr_touches(const TwValue &expr,
+        std::vector<std::string> &reads,
+        std::vector<std::pair<std::string, std::string>> &rebac) {
+    if (expr.is_array()) {
+        for (const TwValue &item : expr.as_array()) collect_expr_touches(item, reads, rebac);
+        return;
+    }
+    if (!expr.is_dict()) return;
+    const TwValue::Dict &d = expr.as_dict();
+
+    if (is_pointer_get(d)) {
+        auto pit = d.find("pointer");
+        if (pit != d.end() && pit->second.is_string()) reads.push_back(pit->second.as_string());
+    }
+
+    if (is_rebac_check(d)) {
+        auto s = d.find("subject");
+        auto o = d.find("object");
+        if (s != d.end() && s->second.is_string() && o != d.end() && o->second.is_string())
+            rebac.emplace_back(s->second.as_string(), o->second.as_string());
+    }
+
+    for (const TwValue::Dict::value_type &kv : d)
+        collect_expr_touches(kv.second, reads, rebac);
+}
+
+inline void collect_body_touches(const TwValue::Array &body,
+        std::vector<std::string> &writes,
+        std::vector<std::string> &reads,
+        std::vector<std::pair<std::string, std::string>> &rebac) {
+    for (const TwValue &step : body) {
+        if (!step.is_dict()) continue;
+        const TwValue::Dict &s = step.as_dict();
+
+        auto set_it = s.find("pointer/set");
+        // Only the string form is a write: build_action reads the same key
+        // with as_string(), so an array-shaped pointer is not a write path the
+        // runtime supports either.
+        if (set_it != s.end() && set_it->second.is_string())
+            writes.push_back(set_it->second.as_string());
+
+        if (auto v = s.find("value"); v != s.end()) collect_expr_touches(v->second, reads, rebac);
+        if (auto ev = s.find("eval"); ev != s.end()) collect_expr_touches(ev->second, reads, rebac);
+    }
+}
+
 inline TwActionFn build_action(const TwValue::Dict &def, const TwValue::Dict &enums) {
     TwValue::Array param_names, bind_defs, body;
     auto get_arr = [&](const char *k) -> TwValue::Array {
@@ -1271,6 +1339,26 @@ inline TwLoaded load_domain(const TwValue &data) {
             TwValue::Dict::const_iterator dur_it = adef.find("duration");
             if (dur_it != adef.end() && dur_it->second.is_string())
                 result.domain.action_durations[np.first] = dur_it->second.as_string();
+
+            // RECTGTN 'T': record what the action touches so tw_check_temporal
+            // can overlap steps that share no state and no ReBAC endpoint.
+            TwValue::Array aparams;
+            std::vector<std::string> param_names;
+            if (auto pit = adef.find("params"); pit != adef.end() && pit->second.is_array()) {
+                aparams = pit->second.as_array();
+                for (const TwValue &p : aparams)
+                    if (p.is_string()) param_names.push_back(p.as_string());
+            }
+            result.domain.action_params[np.first] = param_names;
+
+            if (auto bit = adef.find("body"); bit != adef.end() && bit->second.is_array()) {
+                std::vector<std::string> writes, reads;
+                std::vector<std::pair<std::string, std::string>> rebac;
+                collect_body_touches(bit->second.as_array(), writes, reads, rebac);
+                result.domain.action_writes[np.first] = std::move(writes);
+                result.domain.action_reads[np.first]  = std::move(reads);
+                result.domain.action_rebac[np.first]  = std::move(rebac);
+            }
 
             result.domain.actions[np.first] = build_action(adef, enums);
         }

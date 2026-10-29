@@ -142,6 +142,16 @@ struct TwDomain {
     // ISO 8601 duration strings per action (RECTGTN 'T' temporal metadata).
     std::unordered_map<std::string, std::string>             action_durations;
 
+    // What each action touches, for the concurrency analysis (RECTGTN 'T').
+    // `action_params` is the action's parameter names in call order, so a
+    // `{param}` placeholder in a path or a ReBAC ref resolves per call. The
+    // paths and refs keep their placeholders; tw_check_temporal substitutes.
+    std::unordered_map<std::string, std::vector<std::string>> action_params;
+    std::unordered_map<std::string, std::vector<std::string>> action_writes;
+    std::unordered_map<std::string, std::vector<std::string>> action_reads;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>
+                                                             action_rebac;
+
     bool has_action(const std::string &n) const { return actions.count(n) > 0; }
     bool has_task(const std::string &n)   const { return task_methods.count(n) > 0; }
 };
