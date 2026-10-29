@@ -1210,16 +1210,14 @@ inline TwLoaded load_domain(const TwValue &data) {
     // convention that structured/relational extension data (e.g.
     // KHR_lights_punctual's "/extensions/KHR_lights_punctual/lights") gets
     // its own namespaced slot rather than sharing the generic scalar/vector
-    // "variables" array. Its "entities" list compiles into HAS_CAPABILITY
-    // edges on a TwReBAC::TwReBACGraph (the same graph engine Taskweft.ReBAC
-    // uses standalone), plus an optional explicit "graph" key (identical
-    // wire format to Taskweft.ReBAC's graph_json: {"edges":[...],
-    // "definitions":{}}) for richer relationships (team membership,
-    // delegation, ...). _cap_<cap> state vars are still populated for
-    // introspection/backward compatibility, but action guards are evaluated
-    // against the graph via TwReBAC::check_expr, not read back from those
-    // vars — so a domain can express a capability requirement as an
-    // arbitrary relation expression, not just a direct HAS_CAPABILITY edge.
+    // "variables" array. Its "graph" key (identical wire format to
+    // Taskweft.ReBAC's graph_json: {"edges":[...], "definitions":{}}) is the
+    // single canonical representation: an entity holding a capability is one
+    // HAS_CAPABILITY edge like any other relation, and there is no compiled
+    // "entities" sugar (issue #5). Action guards are evaluated against the
+    // graph via TwReBAC::check_expr, so a domain can express a capability
+    // requirement as an arbitrary relation expression, not just a direct
+    // HAS_CAPABILITY edge.
     //
     // There is no compiled sugar for action requirements: a domain author
     // writes the {"eval": {"type": "rebac/check", ...}} guard step directly
@@ -1230,22 +1228,7 @@ inline TwLoaded load_domain(const TwValue &data) {
     if (auto cap_it = d.find("capabilities"); cap_it != d.end() && cap_it->second.is_dict()) {
         const TwValue::Dict &caps = cap_it->second.as_dict();
 
-        // entities: {entity: [cap, ...]} → HAS_CAPABILITY edge + _cap_<cap>[entity] (compat)
-        TwValue::Dict::const_iterator ent_it = caps.find("entities");
-        if (ent_it != caps.end() && ent_it->second.is_dict()) {
-            for (const std::pair<const std::string, TwValue> &ep : ent_it->second.as_dict()) {
-                if (!ep.second.is_array()) continue;
-                for (const TwValue &cv : ep.second.as_array()) {
-                    const std::string &cap = cv.as_string();
-                    rebac_graph->add_edge(ep.first, cap, "HAS_CAPABILITY");
-                    std::string cap_var = "_cap_" + cap;
-                    result.state->set_nested(cap_var, TwValue(ep.first), TwValue(true));
-                }
-            }
-        }
-
-        // Optional explicit relationship graph, merged into the same graph
-        // the "entities" capability edges above already populated.
+        // The relationship graph, and the only key this loader reads.
         TwValue::Dict::const_iterator graph_it = caps.find("graph");
         if (graph_it != caps.end() && graph_it->second.is_dict()) {
             const TwValue::Dict &gm = graph_it->second.as_dict();

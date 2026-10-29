@@ -21,7 +21,7 @@ all: $(NIF_SO)
 $(PRIV_DIR):
 	mkdir -p $(PRIV_DIR)
 
-$(NIF_SO): c_src/taskweft_nif.cpp | $(PRIV_DIR)
+$(NIF_SO): c_src/taskweft_nif.cpp $(wildcard standalone/*.hpp) | $(PRIV_DIR)
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -shared $< -o $@ $(LDFLAGS)
 
 clean:

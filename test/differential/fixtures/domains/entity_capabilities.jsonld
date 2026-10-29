@@ -6,7 +6,7 @@
   "@type": "domain:Definition",
   "name": "entity_capabilities",
   "version": "1.0",
-  "description": "Multi-agent movement domain with heterogeneous entity capabilities. Each entity type can only execute the action matching its capability (fly / swim / walk). The planner filters alternatives via the capabilities section: domain.actions lists required capabilities per action; domain.capabilities.entities lists the capabilities each entity holds. Only alternatives whose required capability is held by the agent are tried. Implements IPyHOP-temporal ReBAC capability filtering (HAS_CAPABILITY relationships). Demonstrates RECTGTN 'E' with action-capability guards.",
+  "description": "Multi-agent movement domain with heterogeneous entity capabilities. Each entity type can only execute the action matching its capability (fly / swim / walk). The planner filters alternatives via the capabilities section: domain.capabilities.graph.edges lists the capabilities each entity holds, as HAS_CAPABILITY edges. Only alternatives whose required capability is held by the agent are tried. Implements IPyHOP-temporal ReBAC capability filtering (HAS_CAPABILITY relationships). Demonstrates RECTGTN 'E' with action-capability guards.",
   "enums": {
     "location": {
       "base": 0,
@@ -35,34 +35,55 @@
     }
   ],
   "capabilities": {
-    "entities": {
-      "drone_1": [
-        "fly"
+    "graph": {
+      "edges": [
+        {
+          "subject": "drone_1",
+          "rel": "HAS_CAPABILITY",
+          "object": "fly"
+        },
+        {
+          "subject": "drone_2",
+          "rel": "HAS_CAPABILITY",
+          "object": "fly"
+        },
+        {
+          "subject": "boat_1",
+          "rel": "HAS_CAPABILITY",
+          "object": "swim"
+        },
+        {
+          "subject": "boat_2",
+          "rel": "HAS_CAPABILITY",
+          "object": "swim"
+        },
+        {
+          "subject": "human_1",
+          "rel": "HAS_CAPABILITY",
+          "object": "walk"
+        },
+        {
+          "subject": "human_2",
+          "rel": "HAS_CAPABILITY",
+          "object": "walk"
+        },
+        {
+          "subject": "amphibious_1",
+          "rel": "HAS_CAPABILITY",
+          "object": "swim"
+        },
+        {
+          "subject": "amphibious_1",
+          "rel": "HAS_CAPABILITY",
+          "object": "walk"
+        }
       ],
-      "drone_2": [
-        "fly"
-      ],
-      "boat_1": [
-        "swim"
-      ],
-      "boat_2": [
-        "swim"
-      ],
-      "human_1": [
-        "walk"
-      ],
-      "human_2": [
-        "walk"
-      ],
-      "amphibious_1": [
-        "swim",
-        "walk"
-      ]
+      "definitions": {}
     }
   },
   "actions": {
     "a_fly": {
-      "description": "Aerial movement. Requires fly capability. Fast — no terrain restrictions.",
+      "description": "Aerial movement. Requires fly capability. Fast \u2014 no terrain restrictions.",
       "duration": "PT5M",
       "params": [
         "agent",

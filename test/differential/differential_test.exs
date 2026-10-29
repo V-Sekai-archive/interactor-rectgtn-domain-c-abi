@@ -7,7 +7,7 @@ defmodule Taskweft.DifferentialTest do
   @moduletag timeout: 600_000
 
   @steps 50_000
-  @corpus_digest "09dda9928eedeb1bb07ab773cd21e2b5185da428cc789aab0f540212bf5eb5a0"
+  @corpus_digest "0d615f543f97516256b13b7d1e5b452181d5f026d5d9c34991d457346c2893e0"
   @golden_disagreements [
     "golden/entity_capabilities__entity_caps_goal",
     "golden/service_bringup__chi176_local_infra_bringup"
