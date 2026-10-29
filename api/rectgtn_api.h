@@ -134,26 +134,39 @@ RectGTNValidation *rectgtn_domain_validate(const RectGTNString *domain);
 RectGTNPlan *rectgtn_plan(const RectGTNString *domain);
 
 /*
- * replan(domain, plan, fail_step).  `plan` is the intrinsic plan (serialized
- * as the Pascal-JSON "plan" field) currently being executed.  Returns a new
- * RectGTNPlan that is the continuation: the failed step (0-based `fail_step`,
- * -1 = whole plan complete) is re-solved and the temporal block is re-derived.
+ * replan(domain, plan_array, fail_step).  `plan_array` is the "plan" member of
+ * the plan currently being executed: the array, not the answer that carries it
+ * (see replan_json below).  Returns a new RectGTNPlan that is the continuation:
+ * the failed step (0-based `fail_step`, -1 = whole plan complete) is re-solved
+ * and the temporal block is re-derived.
  */
 RectGTNPlan *rectgtn_replan(const RectGTNString *domain,
-                            const RectGTNString *plan_json,
+                            const RectGTNString *plan_array,
                             int fail_step);
 
 /* ------------------------------------------------------------------------
  * Host-facing JSON convenience (NIF-compatible) --------------------------- */
 /*
- * plan_json(domain) -> {"steps":[...], "temporal":{...}}
- * replan_json(domain, plan_json, fail_step) -> {"fail_step","completed_steps",
- *   "plan":[...], "temporal":{...}}
+ * plan_json(domain) ->
+ *   {"plan": [["<action>", "<arg>", ...], ...],
+ *    "temporal": {"consistent": bool, "origin": "<ISO-8601>",
+ *                 "total": "<ISO-8601>",
+ *                 "steps": [{"action": "<name>", "duration": "<ISO-8601>",
+ *                            "start": "<ISO-8601>", "end": "<ISO-8601>"}, ...]}}
+ *
+ * replan_json(domain, plan_array, fail_step) ->
+ *   {"fail_step": int, "completed_steps": int,
+ *    "original_plan": [[...]], "new_plan": [[...]], "recovered": bool}
+ *
+ * `plan_array` is the "plan" member of a plan_json answer, NOT that answer.
+ * Passing the whole envelope is accepted and answers "original_plan": [] with
+ * "completed_steps": 0, which reads as a complete replan without being one.
+ *
  * All strings are Pascal (length + bytes).
  */
 RectGTNString *rectgtn_plan_json(const RectGTNString *domain);
 RectGTNString *rectgtn_replan_json(const RectGTNString *domain,
-                                   const RectGTNString *plan_json,
+                                   const RectGTNString *plan_array,
                                    int fail_step);
 
 /* ------------------------------------------------------------------------
