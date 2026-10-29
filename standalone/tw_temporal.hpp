@@ -7,6 +7,7 @@
 #pragma once
 #include "tw_domain.hpp"
 #include "thirdparty/date/date.h"
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -207,6 +208,143 @@ struct STN {
 };
 } // namespace tw_detail
 
+// ── Concurrency: which steps may overlap (RECTGTN 'T', issue #8) ──────────────
+//
+// The temporal block used to accumulate every duration into one linear
+// timeline, so a plan's total was the sum of its parts even when the steps
+// shared nothing. Two steps that touch no common state pointer and no common
+// ReBAC endpoint are independent, and the plan's total is the makespan of a
+// schedule that runs them side by side.
+
+// What one step touches, with its `{param}` placeholders resolved.
+struct TwStepTouch {
+    std::vector<std::string>                         writes;
+    std::vector<std::string>                         reads;
+    std::vector<std::pair<std::string, std::string>> rebac;
+};
+
+// `{param}` → the call's argument bound to that parameter. A non-string
+// argument renders through to_string(), so `{to_loc}` on an int still
+// distinguishes two calls rather than collapsing them.
+inline std::string tw_resolve_ref(const std::string &text,
+                                  const std::vector<std::string> &names,
+                                  const std::vector<TwValue> &args) {
+    std::string out = text;
+    for (size_t i = 0; i < names.size(); ++i) {
+        const std::string token = "{" + names[i] + "}";
+        std::string value;
+        if (i < args.size()) value = args[i].is_string() ? args[i].as_string() : args[i].to_string();
+        for (size_t at = out.find(token); at != std::string::npos; at = out.find(token, at))
+            out.replace(at, token.size(), value);
+    }
+    return out;
+}
+
+inline std::vector<std::string> tw_resolve_all(const std::vector<std::string> &refs,
+                                               const std::vector<std::string> &names,
+                                               const std::vector<TwValue> &args) {
+    std::vector<std::string> out;
+    out.reserve(refs.size());
+    for (const std::string &ref : refs) out.push_back(tw_resolve_ref(ref, names, args));
+    return out;
+}
+
+inline TwStepTouch tw_step_touch(const TwCall &call, const TwDomain &domain) {
+    TwStepTouch t;
+    static const std::vector<std::string> empty;
+
+    auto pit = domain.action_params.find(call.name);
+    const std::vector<std::string> &names = pit != domain.action_params.end() ? pit->second : empty;
+
+    if (auto w = domain.action_writes.find(call.name); w != domain.action_writes.end())
+        t.writes = tw_resolve_all(w->second, names, call.args);
+
+    if (auto rd = domain.action_reads.find(call.name); rd != domain.action_reads.end())
+        t.reads = tw_resolve_all(rd->second, names, call.args);
+
+    if (auto rb = domain.action_rebac.find(call.name); rb != domain.action_rebac.end())
+        for (const std::pair<std::string, std::string> &pair : rb->second)
+            t.rebac.emplace_back(tw_resolve_ref(pair.first, names, call.args),
+                                 tw_resolve_ref(pair.second, names, call.args));
+
+    return t;
+}
+
+// Two JSON-pointer paths collide when they name the same cell. The pointer
+// grammar is exactly `/var/key` (build_action refuses any other arity), so
+// equality is the whole test — there is no deeper path to be a prefix of.
+inline bool tw_paths_collide(const std::string &a, const std::string &b) {
+    return a == b;
+}
+
+inline bool tw_touch_collides(const std::vector<std::string> &a,
+                              const std::vector<std::string> &b) {
+    for (const std::string &x : a)
+        for (const std::string &y : b)
+            if (tw_paths_collide(x, y)) return true;
+    return false;
+}
+
+// Two steps conflict when one writes what the other writes or reads, or when
+// they ask the ReBAC engine about the same endpoint pair. A read against a
+// read is not a conflict.
+inline bool tw_conflict(const TwStepTouch &a, const TwStepTouch &b) {
+    if (tw_touch_collides(a.writes, b.writes)) return true;
+    if (tw_touch_collides(a.writes, b.reads)) return true;
+    if (tw_touch_collides(a.reads, b.writes)) return true;
+
+    for (const std::pair<std::string, std::string> &p : a.rebac)
+        if (std::find(b.rebac.begin(), b.rebac.end(), p) != b.rebac.end()) return true;
+
+    return false;
+}
+
+struct TwSchedule {
+    std::vector<TwStepTouch> touches;
+    std::vector<int64_t>     start;       // absolute ms, origin included
+    std::vector<int64_t>     end;
+    int64_t                  total;       // makespan, origin excluded
+    bool                     consistent;
+};
+
+// List scheduling in plan order: a step starts at the origin unless it
+// conflicts with an earlier step, in which case it starts when the last of
+// those ends. The order is the plan's own, so every conflict edge runs
+// backwards and the schedule is acyclic.
+inline TwSchedule tw_schedule(const std::vector<TwCall> &plan,
+                              const std::vector<int64_t> &durations,
+                              const TwDomain &domain,
+                              int64_t origin_ms) {
+    TwSchedule s;
+    s.start.assign(plan.size(), origin_ms);
+    s.end.assign(plan.size(), origin_ms);
+    s.total = 0;
+    s.touches.reserve(plan.size());
+    for (const TwCall &call : plan) s.touches.push_back(tw_step_touch(call, domain));
+
+    for (size_t i = 0; i < plan.size(); ++i) {
+        for (size_t j = 0; j < i; ++j)
+            if (tw_conflict(s.touches[j], s.touches[i]) && s.end[j] > s.start[i])
+                s.start[i] = s.end[j];
+        s.end[i] = s.start[i] + durations[i];
+        if (s.end[i] - origin_ms > s.total) s.total = s.end[i] - origin_ms;
+    }
+
+    // The intervals reported must satisfy every conflict constraint — a step
+    // that conflicts with an earlier one may not start before it ends. That is
+    // what `consistent` has always meant: RectGTNTemporal.consistent is false
+    // iff a step overlaps an earlier step it is not allowed to overlap.
+    s.consistent = true;
+    for (size_t i = 0; i < plan.size() && s.consistent; ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (tw_conflict(s.touches[j], s.touches[i]) && s.start[i] < s.end[j]) {
+                s.consistent = false;
+                break;
+            }
+
+    return s;
+}
+
 // Per-step temporal annotation — all time values are ISO 8601 strings.
 struct TwTemporalStep {
     std::string action_name;
@@ -243,44 +381,52 @@ inline TwTemporalResult tw_check_temporal(
         return r;
     }
 
-    tw_detail::STN stn;
-    stn.add_point("t0");
-    std::string prev_end  = "t0";
-    int64_t     current   = origin_ms;
-    int64_t     total_ms  = 0;
+    std::vector<int64_t>     durations;
+    std::vector<std::string> duration_isos;
 
-    for (size_t i = 0; i < plan.size(); ++i) {
-        const std::string &name = plan[i].name;
-
+    for (const TwCall &call : plan) {
         int64_t     dur_ms  = 0;
         std::string dur_iso;
-        auto dit = domain.action_durations.find(name);
+        auto dit = domain.action_durations.find(call.name);
         if (dit != domain.action_durations.end()) {
-            dur_iso       = dit->second;
+            dur_iso        = dit->second;
             int64_t parsed = tw_parse_duration_ms(dur_iso);
             if (parsed >= 0) dur_ms = parsed;
         }
-
-        TwTemporalStep step;
-        step.action_name  = name;
-        step.duration_iso = dur_iso.empty() ? "PT0S" : dur_iso;
-        step.start_iso    = tw_format_duration_ms(current);
-        step.end_iso      = tw_format_duration_ms(current + dur_ms);
-        r.steps.push_back(std::move(step));
-
-        current  += dur_ms;
-        total_ms += dur_ms;
-
-        double dur_s    = static_cast<double>(dur_ms) / 1000.0;
-        std::string a_s = "a" + std::to_string(i) + "_start";
-        std::string a_e = "a" + std::to_string(i) + "_end";
-        stn.add_constraint(prev_end, a_s, 0.0, 0.0);
-        stn.add_constraint(a_s,      a_e, dur_s, dur_s);
-        prev_end = a_e;
+        durations.push_back(dur_ms);
+        duration_isos.push_back(dur_iso.empty() ? "PT0S" : dur_iso);
     }
 
-    r.consistent = stn.consistent();
-    r.total_iso  = tw_format_duration_ms(total_ms);
+    TwSchedule schedule = tw_schedule(plan, durations, domain, origin_ms);
+
+    tw_detail::STN stn;
+    stn.add_point("t0");
+
+    for (size_t i = 0; i < plan.size(); ++i) {
+        TwTemporalStep step;
+        step.action_name  = plan[i].name;
+        step.duration_iso = duration_isos[i];
+        step.start_iso    = tw_format_duration_ms(schedule.start[i]);
+        step.end_iso      = tw_format_duration_ms(schedule.end[i]);
+        r.steps.push_back(std::move(step));
+
+        double dur_s = static_cast<double>(durations[i]) / 1000.0;
+        stn.add_constraint("a" + std::to_string(i) + "_start",
+                           "a" + std::to_string(i) + "_end", dur_s, dur_s);
+    }
+
+    // A conflicting pair is ordered: the later step may not start before the
+    // earlier one ends. A pair that does not conflict carries no constraint,
+    // which is what lets it overlap.
+    for (size_t i = 0; i < plan.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (tw_conflict(schedule.touches[j], schedule.touches[i]))
+                stn.add_constraint("a" + std::to_string(j) + "_end",
+                                   "a" + std::to_string(i) + "_start", 0.0,
+                                   std::numeric_limits<double>::infinity());
+
+    r.consistent = schedule.consistent && stn.consistent();
+    r.total_iso  = tw_format_duration_ms(schedule.total);
     return r;
 }
 
@@ -442,18 +588,17 @@ inline TwTemporalResult tw_check_temporal_civil(
 
     if (plan.empty()) { r.total_iso = "PT0S"; return r; }
 
-    tw_detail::STN stn;
-    stn.add_point("t0");
-    std::string prev_end = "t0";
-    int64_t current  = origin_ms;
-    int64_t total_ms = 0;
+    std::vector<int64_t>     durations;
+    std::vector<std::string> duration_isos;
 
-    for (size_t i = 0; i < plan.size(); ++i) {
-        const std::string &name = plan[i].name;
-
+    // The civil cursor advances through the plan in plan order: a Y/Mo
+    // duration is measured from the date at which the action starts under the
+    // sequential reading, so the calendar pass stays independent of the
+    // schedule the concurrency analysis computes below.
+    for (const TwCall &call : plan) {
         int64_t     dur_ms  = 0;
         std::string dur_iso;
-        auto dit = domain.action_durations.find(name);
+        auto dit = domain.action_durations.find(call.name);
         if (dit != domain.action_durations.end()) {
             dur_iso = dit->second;
             int64_t parsed = (civil_cursor && civil_cursor->ok())
@@ -461,27 +606,37 @@ inline TwTemporalResult tw_check_temporal_civil(
                 : tw_parse_duration_ms(dur_iso);
             if (parsed >= 0) dur_ms = parsed;
         }
-
-        TwTemporalStep step;
-        step.action_name  = name;
-        step.duration_iso = dur_iso.empty() ? "PT0S" : dur_iso;
-        step.start_iso    = tw_format_duration_ms(current);
-        step.end_iso      = tw_format_duration_ms(current + dur_ms);
-        r.steps.push_back(std::move(step));
-
-        current  += dur_ms;
-        total_ms += dur_ms;
-
-        double dur_s    = static_cast<double>(dur_ms) / 1000.0;
-        std::string a_s = "a" + std::to_string(i) + "_start";
-        std::string a_e = "a" + std::to_string(i) + "_end";
-        stn.add_constraint(prev_end, a_s, 0.0, 0.0);
-        stn.add_constraint(a_s,      a_e, dur_s, dur_s);
-        prev_end = a_e;
+        durations.push_back(dur_ms);
+        duration_isos.push_back(dur_iso.empty() ? "PT0S" : dur_iso);
     }
 
-    r.consistent = stn.consistent();
-    r.total_iso  = tw_format_duration_ms(total_ms);
+    TwSchedule schedule = tw_schedule(plan, durations, domain, origin_ms);
+
+    tw_detail::STN stn;
+    stn.add_point("t0");
+
+    for (size_t i = 0; i < plan.size(); ++i) {
+        TwTemporalStep step;
+        step.action_name  = plan[i].name;
+        step.duration_iso = duration_isos[i];
+        step.start_iso    = tw_format_duration_ms(schedule.start[i]);
+        step.end_iso      = tw_format_duration_ms(schedule.end[i]);
+        r.steps.push_back(std::move(step));
+
+        double dur_s = static_cast<double>(durations[i]) / 1000.0;
+        stn.add_constraint("a" + std::to_string(i) + "_start",
+                           "a" + std::to_string(i) + "_end", dur_s, dur_s);
+    }
+
+    for (size_t i = 0; i < plan.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (tw_conflict(schedule.touches[j], schedule.touches[i]))
+                stn.add_constraint("a" + std::to_string(j) + "_end",
+                                   "a" + std::to_string(i) + "_start", 0.0,
+                                   std::numeric_limits<double>::infinity());
+
+    r.consistent = schedule.consistent && stn.consistent();
+    r.total_iso  = tw_format_duration_ms(schedule.total);
     return r;
 }
 
