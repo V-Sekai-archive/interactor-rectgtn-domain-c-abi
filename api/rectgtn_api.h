@@ -136,9 +136,26 @@ RectGTNPlan *rectgtn_plan(const RectGTNString *domain);
 /*
  * replan(domain, plan_array, fail_step).  `plan_array` is the "plan" member of
  * the plan currently being executed: the array, not the answer that carries it
- * (see replan_json below).  Returns a new RectGTNPlan that is the continuation:
- * the failed step (0-based `fail_step`, -1 = whole plan complete) is re-solved
- * and the temporal block is re-derived.
+ * (see replan_json below).  Returns the recovered plan for `domain`.
+ *
+ * `fail_step` is the 0-based index of the action that failed at runtime; -1
+ * means the whole plan ran.  The contract (docs/rectgtn.md "Soundness
+ * contract") is replay, blacklist, re-solve:
+ *
+ *   - the first `fail_step` actions are re-applied, in order, to a copy of the
+ *     initial state.  The prefix is replayed, not restored from a pointer
+ *     history, so no state mutation is rolled back;
+ *   - the command at `fail_step` -- that exact (action, args) instantiation,
+ *     not the action name -- is blacklisted, so the search must find another
+ *     decomposition rather than retry the same step;
+ *   - the planner searches the original task list again from the replayed
+ *     state.  The answer is a whole plan from that state, not a suffix, so an
+ *     alternative that repeats the prefix repeats it here.
+ *
+ * The temporal block is that recovered plan's own, not a continuation of the
+ * failed plan's timeline.  A `fail_step` at or past the end of the plan is the
+ * -1 case.  When no alternative decomposition exists the plan is empty
+ * (step_count == 0, consistent == false), the same refusal rectgtn_plan gives.
  */
 RectGTNPlan *rectgtn_replan(const RectGTNString *domain,
                             const RectGTNString *plan_array,
