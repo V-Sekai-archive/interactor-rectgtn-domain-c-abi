@@ -39,7 +39,14 @@ jobs:
         include:
           - os: ubuntu-latest
             toolchain: gcc
-          - os: macos-latest
+          # macos-latest is arm64, and its runner pool is thin enough that a
+          # job can sit queued and then be cancelled with "The job was not
+          # acquired by Runner of type hosted even after multiple attempts"
+          # and zero steps run. macos-15-intel is the same clang and the same
+          # SDK on the x86_64 pool, so it proves the same thing about the
+          # build; arm64 macOS is covered by the desk, which builds and runs
+          # this NIF's suites locally.
+          - os: macos-15-intel
             toolchain: clang
           # windows-latest currently maps to a win25-vs2026 image that
           # erlef/setup-beam@v1 does not yet recognize (see
